@@ -6,6 +6,11 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Validation\ValidationException;
+use Laravel\Nova\Fields\BelongsToMany;
+use Laravel\Nova\Fields\HasMany;
+use Laravel\Nova\Fields\MorphMany;
+use Laravel\Nova\Fields\MorphToMany;
 use Laravel\Nova\Http\Requests\NovaRequest;
 use Laravel\Nova\Nova;
 use Outl1ne\NovaSortable\Events\RowsReordered;
@@ -239,7 +244,29 @@ class SortableController
             'viaResourceId' => 'present',
         ]);
 
+        if (! empty($request->input('viaResource')) && ! $this->isRelationshipOfParent($request)) {
+            throw ValidationException::withMessages(['viaRelationship' => 'invalid']);
+        }
+
         return $request->resource()::getSortability($request);
+    }
+
+    /**
+     * viaRelationship is called as a method on the parent model, so it must be a to-many field
+     * of the parent resource that lists the sorted resource.
+     */
+    protected function isRelationshipOfParent(NovaRequest $request): bool
+    {
+        $parentResourceClass = Nova::resourceForKey($request->input('viaResource'));
+        if ($parentResourceClass === null || empty($request->input('viaRelationship'))) {
+            return false;
+        }
+
+        return (new $parentResourceClass($request->findParentModelOrFail()))->availableFields($request)->contains(
+            fn ($field) => ($field instanceof HasMany || $field instanceof MorphMany || $field instanceof BelongsToMany || $field instanceof MorphToMany)
+                && $field->attribute === $request->input('viaRelationship')
+                && $field->resourceClass === $request->resource()
+        );
     }
 
     protected function fixSortOrder($sortOrder)
