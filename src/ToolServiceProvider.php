@@ -37,7 +37,7 @@ class ToolServiceProvider extends ServiceProvider
             return;
         }
 
-        Route::middleware(['nova'])
+        Route::middleware(['nova:api'])
             ->prefix('nova-vendor/nova-sortable')
             ->domain(config('nova.domain', null))
             ->namespace('\Outl1ne\NovaSortable\Http\Controllers')

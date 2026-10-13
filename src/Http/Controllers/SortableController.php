@@ -2,6 +2,13 @@
 
 namespace Outl1ne\NovaSortable\Http\Controllers;
 
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Collection;
+use Illuminate\Validation\ValidationException;
+use Laravel\Nova\Fields\BelongsToMany;
+use Laravel\Nova\Fields\HasMany;
+use Laravel\Nova\Fields\MorphMany;
+use Laravel\Nova\Fields\MorphToMany;
 use Laravel\Nova\Http\Requests\NovaRequest;
 use Laravel\Nova\Nova;
 
@@ -79,6 +86,10 @@ class SortableController
                     }
                 }
 
+                if (! $this->authorizedToReorder($request, $relatedModels, $model)) {
+                    return response()->json(['message' => 'This action is unauthorized.'], 403);
+                }
+
                 $relatedModelsCopy = $relatedModels->values();
                 foreach ($resourceIds as $i => $id) {
                     $_model = $relatedModelsCopy->firstWhere($relatedKeyName, $id);
@@ -133,6 +144,10 @@ class SortableController
             }
         }
 
+        if (! $this->authorizedToReorder($request, $models, null)) {
+            return response()->json(['message' => 'This action is unauthorized.'], 403);
+        }
+
         // Continue with reorder
         foreach ($resourceIds as $i => $id) {
             $_model = $models->firstWhere($modelKeyName, $id);
@@ -147,6 +162,9 @@ class SortableController
     {
         $validationResult = $this->validateRequest($request);
         $method = $request->resource()::getOrderByDirection($validationResult->sortable) !== 'DESC' ? 'moveToStart' : 'moveToEnd';
+        if (! $this->authorizedToReorder($request, collect([$validationResult->model]), $request->viaResource() ? $request->findParentModel() : null)) {
+            return response()->json(['message' => 'This action is unauthorized.'], 403);
+        }
         $validationResult->model->{$method}();
 
         return response('', 204);
@@ -156,6 +174,9 @@ class SortableController
     {
         $validationResult = $this->validateRequest($request);
         $method = $request->resource()::getOrderByDirection($validationResult->sortable) !== 'DESC' ? 'moveToEnd' : 'moveToStart';
+        if (! $this->authorizedToReorder($request, collect([$validationResult->model]), $request->viaResource() ? $request->findParentModel() : null)) {
+            return response()->json(['message' => 'This action is unauthorized.'], 403);
+        }
         $validationResult->model->{$method}();
 
         return response('', 204);
@@ -173,7 +194,47 @@ class SortableController
             'viaResourceId' => 'present',
         ]);
 
+        if (! empty($request->input('viaResource')) && ! $this->isRelationshipOfParent($request)) {
+            throw ValidationException::withMessages(['viaRelationship' => 'invalid']);
+        }
+
         return $request->resource()::getSortability($request);
+    }
+
+    /**
+     * viaRelationship is called as a method on the parent model, so it must be a to-many field
+     * of the parent resource that lists the sorted resource.
+     */
+    protected function isRelationshipOfParent(NovaRequest $request): bool
+    {
+        $parentResourceClass = Nova::resourceForKey($request->input('viaResource'));
+        if ($parentResourceClass === null || empty($request->input('viaRelationship'))) {
+            return false;
+        }
+
+        return (new $parentResourceClass($request->findParentModelOrFail()))->availableFields($request)->contains(
+            fn ($field) => ($field instanceof HasMany || $field instanceof MorphMany || $field instanceof BelongsToMany || $field instanceof MorphToMany)
+                && $field->attribute === $request->input('viaRelationship')
+                && $field->resourceClass === $request->resource()
+        );
+    }
+
+    /**
+     * The frontend hides reorder controls without update rights; enforce the same rule on the server.
+     */
+    protected function authorizedToReorder(NovaRequest $request, Collection $models, ?Model $parent): bool
+    {
+        $resourceClass = $request->resource();
+        if ($resourceClass::getSortabilityConfiguration($models->first())['ignore_policies'] ?? false) {
+            return true;
+        }
+
+        // Pivot rows have no resource of their own: reordering them edits the parent.
+        if (in_array($request->input('relationshipType'), ['belongsToMany', 'morphToMany'], true)) {
+            return $parent !== null && Nova::newResourceFromModel($parent)->authorizedToUpdate($request);
+        }
+
+        return $models->every(fn (Model $model) => (new $resourceClass($model))->authorizedToUpdate($request));
     }
 
     protected function fixSortOrder($sortOrder)
