@@ -93,7 +93,7 @@ class SortableController
                     $orderedModels[] = $_model;
                 }
 
-                return $this->reorder(collect($orderedModels), $sortedOrder, $orderColumnName, $model);
+                return $this->reorder($request, collect($orderedModels), $sortedOrder, $orderColumnName, $model);
             }
 
             return response('', 204);
@@ -141,7 +141,7 @@ class SortableController
 
         $orderedModels = collect($resourceIds)->map(fn ($id) => $models->firstWhere($modelKeyName, $id));
 
-        return $this->reorder($orderedModels, $sortedOrder, $orderColumnName);
+        return $this->reorder($request, $orderedModels, $sortedOrder, $orderColumnName);
     }
 
     public function moveToStart(NovaRequest $request)
@@ -163,8 +163,12 @@ class SortableController
     /**
      * Writes the new order and lets listeners veto it, all in one transaction.
      */
-    protected function reorder(Collection $orderedModels, $sortedOrder, string $orderColumnName, ?Model $parent = null)
+    protected function reorder(NovaRequest $request, Collection $orderedModels, $sortedOrder, string $orderColumnName, ?Model $parent = null)
     {
+        if (! $this->authorizedToReorder($request, $orderedModels, $parent)) {
+            return response()->json(['message' => 'This action is unauthorized.'], 403);
+        }
+
         $modelClass = $orderedModels->first()::class;
 
         return $this->inTransaction(function () use ($orderedModels, $sortedOrder, $orderColumnName, $parent, $modelClass) {
@@ -182,12 +186,34 @@ class SortableController
     {
         $parent = $request->viaResource() ? $request->findParentModel() : null;
 
+        if (! $this->authorizedToReorder($request, collect([$model]), $parent)) {
+            return response()->json(['message' => 'This action is unauthorized.'], 403);
+        }
+
         return $this->inTransaction(function () use ($model, $method, $parent) {
             $model->{$method}();
 
             Event::dispatch(new EloquentModelSortedEvent($model::class));
             Event::dispatch(new RowsReordered($model::class, collect([$model]), $parent));
         });
+    }
+
+    /**
+     * The frontend hides reorder controls without update rights; enforce the same rule on the server.
+     */
+    protected function authorizedToReorder(NovaRequest $request, Collection $models, ?Model $parent): bool
+    {
+        $resourceClass = $request->resource();
+        if ($resourceClass::getSortabilityConfiguration($models->first())['ignore_policies'] ?? false) {
+            return true;
+        }
+
+        // Pivot rows have no resource of their own: reordering them edits the parent.
+        if (in_array($request->input('relationshipType'), ['belongsToMany', 'morphToMany'], true)) {
+            return $parent !== null && Nova::newResourceFromModel($parent)->authorizedToUpdate($request);
+        }
+
+        return $models->every(fn (Model $model) => (new $resourceClass($model))->authorizedToUpdate($request));
     }
 
     protected function inTransaction(\Closure $callback)
