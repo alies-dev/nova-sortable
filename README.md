@@ -244,6 +244,23 @@ public static function indexQuery(NovaRequest $request, $query)
 }
 ```
 
+### Reacting to a reorder
+
+Every reorder (drag and drop, move to start, move to end) runs in a database transaction and dispatches two events after the new order is written:
+
+- `Spatie\EloquentSortable\EloquentModelSortedEvent`, the same event `setNewOrder()` dispatches.
+- `Outl1ne\NovaSortable\Events\RowsReordered` with the model class, the moved models in their new order, and the parent model when sorting via a relationship.
+
+A listener can veto the reorder by throwing a `\DomainException`: the transaction is rolled back and Nova shows the exception message.
+
+```php
+Event::listen(RowsReordered::class, function (RowsReordered $event) {
+    if ($event->isFor(Lesson::class) && $event->parent?->isPublished()) {
+        throw new \DomainException('Lessons of a published course cannot be reordered.');
+    }
+});
+```
+
 ## Credits
 
 - [Tarvo Reinpalu](https://github.com/Tarpsvo)

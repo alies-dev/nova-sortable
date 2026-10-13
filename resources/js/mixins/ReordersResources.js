@@ -39,10 +39,10 @@ export default {
         if (e && e.response && e.response.data && e.response.data.canNotReorder) {
           const id = e.response.data.canNotReorder;
           Nova.error(this.__('novaSortable.reorderNotAllowedFor', { id }));
-          this.refreshResourcesList();
-          return;
+        } else {
+          this.showReorderError(e);
         }
-        Nova.error(this.__('novaSortable.reorderError'));
+        await this.refreshResourcesList();
       }
 
       this.reorderLoading = false;
@@ -62,7 +62,7 @@ export default {
         await this.refreshResourcesList();
         Nova.success(this.__('novaSortable.moveToStartSuccessful'));
       } catch (e) {
-        Nova.error(this.__('novaSortable.reorderError'));
+        this.showReorderError(e);
       }
       this.reorderLoading = false;
     },
@@ -81,9 +81,14 @@ export default {
         await this.refreshResourcesList();
         Nova.success(this.__('novaSortable.moveToEndSuccessful'));
       } catch (e) {
-        Nova.error(this.__('novaSortable.reorderError'));
+        this.showReorderError(e);
       }
       this.reorderLoading = false;
+    },
+
+    showReorderError(e) {
+      const message = e && e.response && e.response.status === 422 && e.response.data && e.response.data.message;
+      Nova.error(message || this.__('novaSortable.reorderError'));
     },
 
     async refreshResourcesList() {

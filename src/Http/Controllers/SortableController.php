@@ -2,8 +2,14 @@
 
 namespace Outl1ne\NovaSortable\Http\Controllers;
 
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Laravel\Nova\Http\Requests\NovaRequest;
 use Laravel\Nova\Nova;
+use Outl1ne\NovaSortable\Events\RowsReordered;
+use Spatie\EloquentSortable\EloquentModelSortedEvent;
 
 class SortableController
 {
@@ -80,14 +86,14 @@ class SortableController
                 }
 
                 $relatedModelsCopy = $relatedModels->values();
-                foreach ($resourceIds as $i => $id) {
+                $orderedModels = [];
+                foreach ($resourceIds as $id) {
                     $_model = $relatedModelsCopy->firstWhere($relatedKeyName, $id);
                     $relatedModelsCopy = $relatedModelsCopy->forget($relatedModelsCopy->search($_model));
-                    $sortOrderNr = $sortedOrder[$i];
-
-                    $_model->{$orderColumnName} = $sortOrderNr;
-                    $_model->save();
+                    $orderedModels[] = $_model;
                 }
+
+                return $this->reorder(collect($orderedModels), $sortedOrder, $orderColumnName, $model);
             }
 
             return response('', 204);
@@ -133,30 +139,64 @@ class SortableController
             }
         }
 
-        // Continue with reorder
-        foreach ($resourceIds as $i => $id) {
-            $_model = $models->firstWhere($modelKeyName, $id);
-            $_model->{$orderColumnName} = $sortedOrder[$i];
-            $_model->save();
-        }
+        $orderedModels = collect($resourceIds)->map(fn ($id) => $models->firstWhere($modelKeyName, $id));
 
-        return response('', 204);
+        return $this->reorder($orderedModels, $sortedOrder, $orderColumnName);
     }
 
     public function moveToStart(NovaRequest $request)
     {
         $validationResult = $this->validateRequest($request);
         $method = $request->resource()::getOrderByDirection($validationResult->sortable) !== 'DESC' ? 'moveToStart' : 'moveToEnd';
-        $validationResult->model->{$method}();
 
-        return response('', 204);
+        return $this->move($validationResult->model, $method, $request);
     }
 
     public function moveToEnd(NovaRequest $request)
     {
         $validationResult = $this->validateRequest($request);
         $method = $request->resource()::getOrderByDirection($validationResult->sortable) !== 'DESC' ? 'moveToEnd' : 'moveToStart';
-        $validationResult->model->{$method}();
+
+        return $this->move($validationResult->model, $method, $request);
+    }
+
+    /**
+     * Writes the new order and lets listeners veto it, all in one transaction.
+     */
+    protected function reorder(Collection $orderedModels, $sortedOrder, string $orderColumnName, ?Model $parent = null)
+    {
+        $modelClass = $orderedModels->first()::class;
+
+        return $this->inTransaction(function () use ($orderedModels, $sortedOrder, $orderColumnName, $parent, $modelClass) {
+            foreach ($orderedModels->values() as $i => $_model) {
+                $_model->{$orderColumnName} = $sortedOrder[$i];
+                $_model->save();
+            }
+
+            Event::dispatch(new EloquentModelSortedEvent($modelClass));
+            Event::dispatch(new RowsReordered($modelClass, $orderedModels->values(), $parent));
+        });
+    }
+
+    protected function move(Model $model, string $method, NovaRequest $request)
+    {
+        $parent = $request->viaResource() ? $request->findParentModel() : null;
+
+        return $this->inTransaction(function () use ($model, $method, $parent) {
+            $model->{$method}();
+
+            Event::dispatch(new EloquentModelSortedEvent($model::class));
+            Event::dispatch(new RowsReordered($model::class, collect([$model]), $parent));
+        });
+    }
+
+    protected function inTransaction(\Closure $callback)
+    {
+        try {
+            DB::transaction($callback);
+        } catch (\DomainException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
 
         return response('', 204);
     }
